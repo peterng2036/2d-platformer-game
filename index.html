@@ -18,8 +18,16 @@
           <span class="icon">⭐</span>
           <span id="score-counter">0</span>
         </div>
+        <div class="stat-badge hidden-badge" id="room-badge">
+          <span class="icon">🌐</span>
+          <span id="room-badge-text"></span>
+        </div>
+        <div class="stat-badge hidden-badge hp-badge" id="hp-badge" title="Your health">
+          <span id="hp-badge-text">♥♥♥</span>
+        </div>
       </div>
       <div class="hud-right">
+        <button id="mp-btn" class="ui-btn" title="Play online with friends">🌐 Multiplayer</button>
         <button id="sound-btn" class="ui-btn" title="Toggle Sound (M)">🔊 Sound: ON</button>
         <button id="restart-btn" class="ui-btn" title="Reset (R)">🔄 Reset</button>
       </div>
@@ -30,8 +38,42 @@
     <div id="controls-hint">
       <span><strong>A / D</strong> or <strong>← / →</strong> : Move</span>
       <span><strong>Space</strong> or <strong>W</strong> or <strong>↑</strong> : Jump (Double Jump!)</span>
+      <span><strong>F</strong> or <strong>J</strong> : Attack</span>
       <span><strong>R</strong> : Reset</span>
       <span><strong>M</strong> : Sound</span>
+    </div>
+
+    <!-- Multiplayer lobby -->
+    <div id="lobby-modal" class="hidden">
+      <div class="modal-content lobby">
+        <h2>🌐 Multiplayer</h2>
+        <p class="lobby-sub">Up to 4 players. Everyone has 3 ♥ — hit rivals with <b>F</b> / <b>J</b>. Coins are shared.</p>
+
+        <label class="field-label" for="mp-name">Your name</label>
+        <input id="mp-name" type="text" maxlength="12" autocomplete="off" spellcheck="false" />
+
+        <div id="lobby-menu">
+          <button id="mp-create" class="action-btn">Create Room</button>
+          <div class="or-divider"><span>or join a friend</span></div>
+          <div class="join-row">
+            <input id="mp-code" type="text" maxlength="5" placeholder="ROOM CODE" autocomplete="off" spellcheck="false" />
+            <button id="mp-join" class="action-btn secondary">Join</button>
+          </div>
+        </div>
+
+        <div id="lobby-room" class="hidden">
+          <div class="room-code-box">
+            <span class="room-code-label">Room code</span>
+            <span id="mp-room-code" class="room-code">-----</span>
+          </div>
+          <button id="mp-copy" class="action-btn secondary">📋 Copy invite link</button>
+          <ul id="mp-players" class="player-list"></ul>
+          <button id="mp-leave" class="action-btn danger">Leave Room</button>
+        </div>
+
+        <p id="mp-status" class="mp-status"></p>
+        <button id="mp-close" class="close-x" title="Close (Esc)">✕</button>
+      </div>
     </div>
 
     <!-- Victory message overlay -->
@@ -45,6 +87,9 @@
     </div>
   </div>
 
+  <!-- PeerJS: free WebRTC peer-to-peer connections (no server of our own needed) -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="multiplayer.js"></script>
   <script src="game.js"></script>
 </body>
 </html>

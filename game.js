@@ -143,6 +143,48 @@ class AudioEngine {
     } catch (e) {}
   }
 
+  playSwing() {
+    if (!this.enabled || !this.ctx) return;
+    try {
+      const now = this.ctx.currentTime;
+      const len = Math.floor(this.ctx.sampleRate * 0.14);
+      const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+      const src = this.ctx.createBufferSource();
+      src.buffer = buf;
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.setValueAtTime(900, now);
+      filter.frequency.exponentialRampToValueAtTime(3200, now + 0.12);
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.22, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+      src.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.ctx.destination);
+      src.start(now);
+    } catch (e) {}
+  }
+
+  playHit() {
+    if (!this.enabled || !this.ctx) return;
+    try {
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(190, now);
+      osc.frequency.exponentialRampToValueAtTime(55, now + 0.18);
+      gain.gain.setValueAtTime(0.3, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.2);
+    } catch (e) {}
+  }
+
   playBounce() {
     if (!this.enabled || !this.ctx) return;
     try {
@@ -206,6 +248,7 @@ class InputManager {
     this.jumpJustPressed = false;
 
     window.addEventListener('keydown', (e) => {
+      if (e.target && e.target.tagName === 'INPUT') return;
       audio.init();
       if (['Space', 'ArrowUp', 'KeyW', 'ArrowLeft', 'ArrowRight', 'KeyA', 'KeyD'].includes(e.code)) {
         e.preventDefault();
@@ -213,6 +256,10 @@ class InputManager {
 
       if ((e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') && !this.keys[e.code]) {
         this.jumpJustPressed = true;
+      }
+
+      if ((e.code === 'KeyF' || e.code === 'KeyJ') && !this.keys[e.code]) {
+        this.attackJustPressed = true;
       }
 
       this.keys[e.code] = true;
@@ -245,6 +292,14 @@ class InputManager {
   consumeJump() {
     if (this.jumpJustPressed) {
       this.jumpJustPressed = false;
+      return true;
+    }
+    return false;
+  }
+
+  consumeAttack() {
+    if (this.attackJustPressed) {
+      this.attackJustPressed = false;
       return true;
     }
     return false;
@@ -381,9 +436,53 @@ class Player {
     this.blinkTimer = 0;
     this.isBlinking = false;
     this.runCycle = 0;
+
+    // Combat
+    this.maxHp = 3;
+    this.hp = this.maxHp;
+    this.dead = false;
+    this.respawnTimer = 0;
+    this.invuln = 0; // frames of invulnerability after a hit / respawn
+    this.attackDuration = 12; // frames the slash animation lasts
+    this.attackTimer = 0;
+    this.attackCooldown = 0;
+    this.hitSet = new Set(); // remote players already hit by the current swing
+    this.cloak = null; // optional cloak color (used to tell online players apart)
   }
 
-  reset() {
+  /** Is the slash currently able to hurt someone? (middle of the swing) */
+  isAttackActive() {
+    return !this.dead && this.attackTimer > 1 && this.attackTimer <= this.attackDuration - 3;
+  }
+
+  /**
+   * Take one point of damage. Returns 'dead' if this killed us, 'hit' if we
+   * survived, or null if the hit was ignored (invulnerable / already dead).
+   */
+  takeHit(dir, particles) {
+    if (this.dead || this.invuln > 0) return null;
+    this.hp = Math.max(0, this.hp - 1);
+    this.invuln = 70;
+    this.vx = dir * 7;
+    this.vy = -6;
+    this.onGround = false;
+    this.scaleX = 0.8;
+    this.scaleY = 1.2;
+    audio.playHit();
+    const cx = this.x + this.width / 2;
+    const cy = this.y + this.height / 2;
+    particles.burst(cx, cy, 14, '#8f2b2b', 4);
+    if (this.hp <= 0) {
+      this.dead = true;
+      this.respawnTimer = 180; // 3 seconds
+      this.attackTimer = 0;
+      particles.burst(cx, cy, 30, '#6e1f1f', 5);
+      return 'dead';
+    }
+    return 'hit';
+  }
+
+  reset(full = true) {
     this.x = this.startX;
     this.y = this.startY;
     this.vx = 0;
@@ -392,9 +491,43 @@ class Player {
     this.canDoubleJump = true;
     this.scaleX = 1;
     this.scaleY = 1;
+    if (full) {
+      this.hp = this.maxHp;
+      this.dead = false;
+      this.respawnTimer = 0;
+      this.invuln = 0;
+      this.attackTimer = 0;
+      this.attackCooldown = 0;
+    }
   }
 
   update(level, particles) {
+    // Combat timers
+    if (this.attackTimer > 0) this.attackTimer--;
+    if (this.attackCooldown > 0) this.attackCooldown--;
+    if (this.invuln > 0) this.invuln--;
+
+    // Defeated: sit out, then respawn with full health
+    if (this.dead) {
+      input.consumeJump();
+      input.consumeAttack();
+      this.respawnTimer--;
+      if (this.respawnTimer <= 0) {
+        this.reset(true);
+        this.invuln = 90;
+        particles.burst(this.x + this.width / 2, this.y + this.height / 2, 16, '#c9d3df', 3);
+      }
+      return;
+    }
+
+    // Start a new swing
+    if (input.consumeAttack() && this.attackCooldown <= 0) {
+      this.attackTimer = this.attackDuration;
+      this.attackCooldown = 28;
+      this.hitSet.clear();
+      audio.playSwing();
+    }
+
     // Jump buffering
     if (input.consumeJump()) {
       this.jumpBufferCounter = this.jumpBufferMax;
@@ -460,7 +593,7 @@ class Player {
         this.scaleX = 0.8;
         this.scaleY = 1.25;
         audio.playDoubleJump();
-        particles.burst(this.x + this.width / 2, this.y + this.height / 2, 12, '#38bdf8', 3);
+        particles.burst(this.x + this.width / 2, this.y + this.height / 2, 12, '#c9d3df', 3);
       }
     }
 
@@ -506,7 +639,7 @@ class Player {
 
     // Respawn if fell off the level
     if (this.y > level.height + 200) {
-      this.reset();
+      this.reset(false);
       particles.burst(this.x + this.width / 2, this.y + this.height / 2, 20, '#ef4444', 4);
     }
   }
@@ -575,100 +708,163 @@ class Player {
   }
 
   draw(ctx, camera) {
+    if (this.dead) return;
     ctx.save();
-    // Center transformation for squash & stretch
+    // Flicker while invulnerable after being hit
+    if (this.invuln > 0 && Math.floor(this.invuln / 4) % 2 === 0) ctx.globalAlpha = 0.4;
+    // Origin = feet center (hitbox is wider than the visible figure)
     const centerX = this.x + this.width / 2 - camera.x;
     const centerY = this.y + this.height - camera.y;
 
-    // Shadow on ground below player
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.18)';
+    // Soft contact shadow on the ground
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
     ctx.beginPath();
-    ctx.ellipse(centerX, centerY + 2, (this.width / 2) * this.scaleX, 4, 0, 0, Math.PI * 2);
+    ctx.ellipse(centerX, centerY + 2, 11 * this.scaleX, 3, 0, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.translate(centerX, centerY);
-    ctx.scale(this.scaleX, this.scaleY);
+    ctx.scale(this.scaleX * this.facing, this.scaleY);
 
-    // Body Gradient (Charming Blue/Cyan Blob Knight)
-    const bodyGrad = ctx.createLinearGradient(0, -this.height, 0, 0);
-    bodyGrad.addColorStop(0, '#38bdf8');
-    bodyGrad.addColorStop(1, '#0284c7');
+    const moving = this.onGround && Math.abs(this.vx) > 0.6;
+    const swing = moving ? Math.sin(this.runCycle * 1.6) : 0;
+    const airborne = !this.onGround;
+    const rise = airborne ? Math.max(-1, Math.min(1, this.vy / 10)) : 0; // -1 rising ... 1 falling
+    const bob = moving ? Math.abs(Math.sin(this.runCycle * 1.6)) * -1.5 : 0;
 
-    ctx.fillStyle = bodyGrad;
-    ctx.shadowColor = 'rgba(56, 189, 248, 0.4)';
-    ctx.shadowBlur = 10;
-
-    // Rounded character body
-    const rx = -this.width / 2;
-    const ry = -this.height;
-    const rw = this.width;
-    const rh = this.height;
-    const radius = 10;
-
+    // --- Cloak tail (behind the body), trails opposite to movement ---
+    const trail = airborne ? 6 + rise * 5 : 3 + Math.abs(this.vx) * 1.4;
+    const flutter = Math.sin(this.runCycle * 1.2 + 1) * 1.5;
+    ctx.fillStyle = this.cloak || '#2b2f36';
     ctx.beginPath();
-    ctx.moveTo(rx + radius, ry);
-    ctx.lineTo(rx + rw - radius, ry);
-    ctx.quadraticCurveTo(rx + rw, ry, rx + rw, ry + radius);
-    ctx.lineTo(rx + rw, ry + rh - radius);
-    ctx.quadraticCurveTo(rx + rw, ry + rh, rx + rw - radius, ry + rh);
-    ctx.lineTo(rx + radius, ry + rh);
-    ctx.quadraticCurveTo(rx, ry + rh, rx, ry + rh - radius);
-    ctx.lineTo(rx, ry + radius);
-    ctx.quadraticCurveTo(rx, ry, rx + radius, ry);
+    ctx.moveTo(-3, -27 + bob);
+    ctx.quadraticCurveTo(-8 - trail, -18 + flutter, -9 - trail * 1.3, -6 + flutter + (airborne ? -rise * 6 : 0));
+    ctx.lineTo(-3, -9 + bob);
     ctx.closePath();
     ctx.fill();
 
-    // Reset shadow
-    ctx.shadowColor = 'transparent';
-    ctx.shadowBlur = 0;
-
-    // Cute Knight Scarf / Antenna
-    ctx.fillStyle = '#f43f5e';
-    const scarfOffset = Math.sin(this.runCycle) * 3 * this.facing;
-    ctx.fillRect(rx + 4, ry + 16, rw - 8, 5);
+    // --- Back leg ---
+    const legBack = airborne ? -2 - rise * 2 : -swing * 5;
+    ctx.strokeStyle = '#15171b';
+    ctx.lineWidth = 4.2;
+    ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(rx + (this.facing > 0 ? 4 : rw - 4), ry + 18);
-    ctx.lineTo(rx + (this.facing > 0 ? -6 : rw + 6) + scarfOffset, ry + 22);
-    ctx.lineTo(rx + (this.facing > 0 ? 4 : rw - 4), ry + 21);
+    ctx.moveTo(-1.5, -12 + bob);
+    ctx.lineTo(-1.5 + legBack, airborne ? -4 : -1);
+    ctx.stroke();
+
+    // --- Torso (coat) with fabric shading ---
+    const coat = ctx.createLinearGradient(-7, 0, 7, 0);
+    coat.addColorStop(0, '#2c3038');
+    coat.addColorStop(0.55, '#454b57');
+    coat.addColorStop(1, '#262a31');
+    ctx.fillStyle = coat;
+    ctx.beginPath();
+    ctx.moveTo(-6, -26 + bob);
+    ctx.quadraticCurveTo(0, -29 + bob, 6, -26 + bob);
+    ctx.lineTo(7, -11 + bob);
+    ctx.lineTo(-7, -11 + bob);
+    ctx.closePath();
     ctx.fill();
 
-    // Eyes
+    // Belt and strap
+    ctx.fillStyle = '#6b5232';
+    ctx.fillRect(-7, -16 + bob, 14, 2.2);
+    ctx.fillStyle = '#9a8a5a';
+    ctx.fillRect(-1, -16.3 + bob, 2.4, 2.8);
+    ctx.strokeStyle = '#4a3a24';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(-5, -25 + bob);
+    ctx.lineTo(5, -13 + bob);
+    ctx.stroke();
+
+    // --- Front leg ---
+    const legFront = airborne ? 3 + rise * 3 : swing * 5;
+    ctx.strokeStyle = '#1c1f25';
+    ctx.lineWidth = 4.4;
+    ctx.beginPath();
+    ctx.moveTo(1.5, -12 + bob);
+    ctx.lineTo(1.5 + legFront, airborne ? -5 + rise * -1 : -1);
+    ctx.stroke();
+
+    // Boots
+    ctx.fillStyle = '#0f1013';
+    ctx.fillRect(-1.5 + legBack - 3, airborne ? -6 : -3, 5.5, 3);
+    ctx.fillRect(1.5 + legFront - 2.5, airborne ? -7 + rise * -1 : -3, 6, 3);
+
+    // --- Arm (front), swings opposite to the front leg ---
+    const armAng = airborne ? -0.9 - rise * 0.5 : -swing * 0.7;
+    ctx.save();
+    ctx.translate(2, -24 + bob);
+    ctx.rotate(armAng);
+    ctx.strokeStyle = '#3a3f4a';
+    ctx.lineWidth = 3.6;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(1, 9);
+    ctx.stroke();
+    ctx.fillStyle = '#b08a6a';
+    ctx.beginPath();
+    ctx.arc(1.2, 10, 1.9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // --- Hood / head ---
+    const hood = ctx.createRadialGradient(1, -33 + bob, 1, 0, -31 + bob, 9);
+    hood.addColorStop(0, '#4a505c');
+    hood.addColorStop(1, '#23262d');
+    ctx.fillStyle = hood;
+    ctx.beginPath();
+    ctx.moveTo(-7, -25 + bob);
+    ctx.quadraticCurveTo(-8, -37 + bob, 0, -37 + bob);
+    ctx.quadraticCurveTo(8, -37 + bob, 7, -25 + bob);
+    ctx.quadraticCurveTo(0, -23 + bob, -7, -25 + bob);
+    ctx.closePath();
+    ctx.fill();
+
+    // Face opening in deep shadow
+    ctx.fillStyle = '#0b0c0f';
+    ctx.beginPath();
+    ctx.ellipse(2.8, -30 + bob, 3.8, 4.6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyes: tiny, pale glints (blink = thin line)
     if (!this.isBlinking) {
-      const eyeOffsetX = this.facing * 4;
-      const eyeY = ry + 12;
-
-      // Eye whites
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(eyeOffsetX - 4, eyeY, 4, 0, Math.PI * 2);
-      ctx.arc(eyeOffsetX + 4, eyeY, 4, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Pupils (looking toward movement direction)
-      ctx.fillStyle = '#0f172a';
-      ctx.beginPath();
-      ctx.arc(eyeOffsetX - 4 + this.facing * 1.5, eyeY, 2, 0, Math.PI * 2);
-      ctx.arc(eyeOffsetX + 4 + this.facing * 1.5, eyeY, 2, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Eye catchlights
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(eyeOffsetX - 5 + this.facing, eyeY - 1.2, 1, 0, Math.PI * 2);
-      ctx.arc(eyeOffsetX + 3 + this.facing, eyeY - 1.2, 1, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillStyle = '#e8e2cf';
+      ctx.fillRect(2.2, -31.2 + bob, 1.6, 1.3);
+      ctx.fillRect(4.4, -31.2 + bob, 1.4, 1.3);
     } else {
-      // Blinking lines
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 2;
+      ctx.fillStyle = '#e8e2cf';
+      ctx.fillRect(2.2, -30.8 + bob, 3.6, 0.5);
+    }
+
+    // Warm rim light on the hood edge from the sunset
+    ctx.strokeStyle = 'rgba(255, 190, 130, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(1, -36.5 + bob);
+    ctx.quadraticCurveTo(7, -36 + bob, 7, -26 + bob);
+    ctx.stroke();
+
+    // --- Attack slash: a bright crescent sweeping in front of the player ---
+    if (this.attackTimer > 0) {
+      const t = 1 - this.attackTimer / this.attackDuration; // 0 -> 1
+      const alpha = Math.sin(Math.PI * Math.min(1, t * 1.15));
+      const sweep = -1.3 + t * 2.3;
+      ctx.save();
+      ctx.translate(5, -17);
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = `rgba(235, 238, 245, ${0.85 * alpha})`;
+      ctx.lineWidth = 3.5;
       ctx.beginPath();
-      const eyeOffsetX = this.facing * 4;
-      const eyeY = ry + 12;
-      ctx.moveTo(eyeOffsetX - 7, eyeY);
-      ctx.lineTo(eyeOffsetX - 1, eyeY);
-      ctx.moveTo(eyeOffsetX + 1, eyeY);
-      ctx.lineTo(eyeOffsetX + 7, eyeY);
+      ctx.arc(0, 0, 25, sweep - 0.9, sweep);
       ctx.stroke();
+      ctx.strokeStyle = `rgba(255, 210, 150, ${0.5 * alpha})`;
+      ctx.lineWidth = 7;
+      ctx.beginPath();
+      ctx.arc(0, 0, 24, sweep - 0.6, sweep);
+      ctx.stroke();
+      ctx.restore();
     }
 
     ctx.restore();
@@ -688,6 +884,7 @@ class Coin {
   update(player, particles) {
     if (this.collected) return false;
     this.phase += 0.06;
+    if (player.dead) return false;
 
     // Check collision with player
     const playerCenterX = player.x + player.width / 2;
@@ -713,27 +910,48 @@ class Coin {
     const currentY = this.y + Math.sin(this.phase) * 5 - camera.y;
     const currentX = this.x - camera.x;
 
-    // 3D spinning ellipse simulation
-    const spinWidth = Math.cos(this.phase * 1.5) * this.radius;
+    // Spinning coin: horizontal radius shrinks as it turns edge-on
+    const spin = Math.cos(this.phase * 1.5);
+    const rw = Math.max(1.5, Math.abs(spin) * this.radius);
+    const rh = this.radius;
 
     ctx.save();
     ctx.translate(currentX, currentY);
 
-    // Glowing aura
-    ctx.shadowColor = '#facc15';
-    ctx.shadowBlur = 12;
+    // Soft warm glow (subtle)
+    const aura = ctx.createRadialGradient(0, 0, 2, 0, 0, this.radius * 2.2);
+    aura.addColorStop(0, 'rgba(255, 200, 90, 0.25)');
+    aura.addColorStop(1, 'rgba(255, 200, 90, 0)');
+    ctx.fillStyle = aura;
+    ctx.fillRect(-this.radius * 2.2, -this.radius * 2.2, this.radius * 4.4, this.radius * 4.4);
 
-    // Outer coin
-    ctx.fillStyle = '#eab308';
+    // Coin face: brushed-gold gradient, brighter on one side to read as metal
+    const g = ctx.createLinearGradient(-rw, -rh, rw, rh);
+    g.addColorStop(0, '#f1d98a');
+    g.addColorStop(0.45, '#b98a2c');
+    g.addColorStop(1, '#6b4a14');
+    ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.ellipse(0, 0, Math.max(1, Math.abs(spinWidth)), this.radius, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, 0, rw, rh, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Inner rim
-    ctx.fillStyle = '#fde047';
-    ctx.beginPath();
-    ctx.ellipse(0, 0, Math.max(0.5, Math.abs(spinWidth * 0.7)), this.radius * 0.7, 0, 0, Math.PI * 2);
-    ctx.fill();
+    // Dark outer edge
+    ctx.strokeStyle = '#4a3410';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    // Inner embossed ring + highlight, only visible when facing the camera
+    if (rw > 4) {
+      ctx.strokeStyle = 'rgba(70, 48, 12, 0.7)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, rw * 0.68, rh * 0.68, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(255, 240, 190, 0.45)';
+      ctx.beginPath();
+      ctx.ellipse(-0.5, -0.5, rw * 0.68, rh * 0.68, 0, Math.PI * 1.05, Math.PI * 1.65);
+      ctx.stroke();
+    }
 
     ctx.restore();
   }
@@ -762,27 +980,88 @@ class Spring {
     const rh = this.h - this.compress;
 
     ctx.save();
-    // Base plate
-    ctx.fillStyle = '#475569';
-    ctx.fillRect(rx - 2, ry + rh - 4, this.w + 4, 4);
+    // Base plate (dark steel)
+    const baseG = ctx.createLinearGradient(0, ry + rh - 5, 0, ry + rh);
+    baseG.addColorStop(0, '#59616b');
+    baseG.addColorStop(1, '#23272d');
+    ctx.fillStyle = baseG;
+    ctx.fillRect(rx - 2, ry + rh - 5, this.w + 4, 5);
 
-    // Red spring cap
-    ctx.fillStyle = '#f43f5e';
-    ctx.beginPath();
-    ctx.roundRect ? ctx.roundRect(rx, ry, this.w, 6, 3) : ctx.fillRect(rx, ry, this.w, 6);
-    ctx.fill();
+    // Steel coil: alternating dark/light strokes with a metallic sheen
+    const coils = 4;
+    const coilH = Math.max(1, (rh - 9) / coils);
+    for (let i = 0; i < coils; i++) {
+      const cy = ry + 6 + i * coilH;
+      ctx.strokeStyle = '#1a1d22';
+      ctx.lineWidth = 3.2;
+      ctx.beginPath();
+      ctx.moveTo(rx + 5, cy + coilH);
+      ctx.lineTo(rx + this.w - 5, cy);
+      ctx.stroke();
+      ctx.strokeStyle = '#9aa4af';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(rx + 5, cy + coilH - 1);
+      ctx.lineTo(rx + this.w - 5, cy - 1);
+      ctx.stroke();
+    }
 
-    // Spring coils
-    ctx.strokeStyle = '#e2e8f0';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(rx + 6, ry + 6);
-    ctx.lineTo(rx + this.w - 6, ry + rh - 4);
-    ctx.stroke();
+    // Top plate with brushed-metal gradient and a worn orange hazard edge
+    const capG = ctx.createLinearGradient(0, ry, 0, ry + 6);
+    capG.addColorStop(0, '#8b949e');
+    capG.addColorStop(1, '#3b4047');
+    ctx.fillStyle = capG;
+    ctx.fillRect(rx - 1, ry, this.w + 2, 6);
+    ctx.fillStyle = '#a4552b';
+    ctx.fillRect(rx - 1, ry + 4, this.w + 2, 2);
 
     ctx.restore();
   }
 }
+
+// --- Procedural Textures (generated once) ---
+function seededRandom(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+function makeNoisePattern(size, baseRGB, variance, seed, blotches = 0) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g = c.getContext('2d');
+  const rnd = seededRandom(seed);
+  const img = g.createImageData(size, size);
+  for (let i = 0; i < size * size; i++) {
+    const v = (rnd() - 0.5) * variance;
+    img.data[i * 4] = Math.max(0, Math.min(255, baseRGB[0] + v));
+    img.data[i * 4 + 1] = Math.max(0, Math.min(255, baseRGB[1] + v));
+    img.data[i * 4 + 2] = Math.max(0, Math.min(255, baseRGB[2] + v));
+    img.data[i * 4 + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  // Large soft blotches break up the repetition so it reads as natural stone
+  for (let i = 0; i < blotches; i++) {
+    const x = rnd() * size;
+    const y = rnd() * size;
+    const r = 8 + rnd() * 26;
+    const dark = rnd() > 0.5;
+    const grad = g.createRadialGradient(x, y, 0, x, y, r);
+    grad.addColorStop(0, dark ? 'rgba(0,0,0,0.22)' : 'rgba(255,255,255,0.10)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grad;
+    g.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+  return ctx.createPattern(c, 'repeat');
+}
+
+const TEX = {
+  rock: makeNoisePattern(128, [88, 90, 96], 44, 11, 18),
+  earth: makeNoisePattern(128, [78, 62, 48], 40, 29, 18),
+  grain: makeNoisePattern(128, [128, 128, 128], 255, 7, 0)
+};
 
 // --- Level Definition ---
 class Level {
@@ -851,6 +1130,16 @@ class Level {
     this.coins = coinPositions.map((pos) => new Coin(pos.x, pos.y));
     this.totalCoins = this.coins.length;
 
+    // Night sky stars
+    this.stars = [];
+    for (let i = 0; i < 90; i++) {
+      this.stars.push({
+        x: Math.random() * (VIEW_WIDTH + 100),
+        y: Math.random() * 260,
+        r: Math.random() < 0.15 ? 1.6 : 1,
+        a: 0.2 + Math.random() * 0.5
+      });
+    }
     // Decorative drifting clouds
     for (let i = 0; i < 16; i++) {
       this.clouds.push({
@@ -876,105 +1165,211 @@ class Level {
 
     // Coins
     let collectedCount = 0;
-    for (const coin of this.coins) {
+    this.coins.forEach((coin, idx) => {
       if (coin.update(player, particles)) {
         game.addScore(100);
+        net.sendCoin(idx);
       }
       if (coin.collected) collectedCount++;
-    }
+    });
     return collectedCount;
   }
 
   drawBackground(ctx, camera) {
-    // Sky Gradient
+    // Dusk sky: deep blue-grey fading to a muted amber horizon
     const skyGrad = ctx.createLinearGradient(0, 0, 0, VIEW_HEIGHT);
-    skyGrad.addColorStop(0, '#38bdf8');
-    skyGrad.addColorStop(0.65, '#bae6fd');
-    skyGrad.addColorStop(1, '#f0f9ff');
+    skyGrad.addColorStop(0, '#0b1220');
+    skyGrad.addColorStop(0.35, '#1c2a3f');
+    skyGrad.addColorStop(0.65, '#4a5568');
+    skyGrad.addColorStop(0.85, '#a1805e');
+    skyGrad.addColorStop(1, '#c79a6b');
     ctx.fillStyle = skyGrad;
     ctx.fillRect(0, 0, VIEW_WIDTH, VIEW_HEIGHT);
 
-    // Distant Parallax Hills (Factor 0.12)
-    ctx.fillStyle = '#93c5fd';
-    ctx.beginPath();
-    ctx.moveTo(0, VIEW_HEIGHT);
-    const hillOffset1 = camera.x * 0.12;
-    for (let x = 0; x <= VIEW_WIDTH; x += 60) {
-      const worldX = x + hillOffset1;
-      const y = 340 + Math.sin(worldX * 0.003) * 70 + Math.cos(worldX * 0.008) * 35;
-      ctx.lineTo(x, y);
+    // Faint stars in the upper sky
+    for (const s of this.stars) {
+      ctx.fillStyle = `rgba(230, 235, 245, ${s.a})`;
+      ctx.fillRect(s.x - camera.x * 0.02, s.y, s.r, s.r);
     }
-    ctx.lineTo(VIEW_WIDTH, VIEW_HEIGHT);
-    ctx.fill();
 
-    // Midground Parallax Hills (Factor 0.28)
-    ctx.fillStyle = '#6ee7b7';
-    ctx.beginPath();
-    ctx.moveTo(0, VIEW_HEIGHT);
-    const hillOffset2 = camera.x * 0.28;
-    for (let x = 0; x <= VIEW_WIDTH; x += 40) {
-      const worldX = x + hillOffset2;
-      const y = 410 + Math.sin(worldX * 0.005) * 50 + Math.sin(worldX * 0.012) * 20;
-      ctx.lineTo(x, y);
-    }
-    ctx.lineTo(VIEW_WIDTH, VIEW_HEIGHT);
-    ctx.fill();
+    // Low sun glow near the horizon (soft, not a cartoon disc)
+    const sunX = 700 - camera.x * 0.05;
+    const glow = ctx.createRadialGradient(sunX, 400, 5, sunX, 400, 330);
+    glow.addColorStop(0, 'rgba(255, 190, 120, 0.55)');
+    glow.addColorStop(0.4, 'rgba(210, 130, 80, 0.2)');
+    glow.addColorStop(1, 'rgba(210, 130, 80, 0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, VIEW_WIDTH, VIEW_HEIGHT);
 
-    // Floating Clouds (Parallax Factor 0.35)
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
+    // Soft, thin cloud streaks
     for (const c of this.clouds) {
-      const renderX = c.x - camera.x * 0.35;
+      const renderX = c.x - camera.x * 0.2;
       if (renderX + c.w > -50 && renderX < VIEW_WIDTH + 50) {
-        ctx.beginPath();
-        ctx.ellipse(renderX, c.y, c.w / 2, 22, 0, 0, Math.PI * 2);
-        ctx.ellipse(renderX - c.w * 0.2, c.y + 2, c.w * 0.35, 18, 0, 0, Math.PI * 2);
-        ctx.ellipse(renderX + c.w * 0.2, c.y + 2, c.w * 0.35, 18, 0, 0, Math.PI * 2);
-        ctx.fill();
+        const g = ctx.createRadialGradient(renderX, c.y, 2, renderX, c.y, c.w * 0.6);
+        g.addColorStop(0, 'rgba(190, 170, 160, 0.16)');
+        g.addColorStop(1, 'rgba(190, 170, 160, 0)');
+        ctx.fillStyle = g;
+        ctx.save();
+        ctx.translate(renderX, c.y);
+        ctx.scale(1, 0.16);
+        ctx.translate(-renderX, -c.y);
+        ctx.fillRect(renderX - c.w, c.y - c.w, c.w * 2, c.w * 2);
+        ctx.restore();
       }
     }
+
+    // Mountain layers: far -> near, colors desaturate with distance (atmospheric perspective)
+    const layers = [
+      { f: 0.06, base: 330, amp: 120, freq: 0.0021, color: '#5b6577', haze: 0.0 },
+      { f: 0.12, base: 380, amp: 95, freq: 0.0032, color: '#3f4858', haze: 0.0 },
+      { f: 0.22, base: 430, amp: 70, freq: 0.0046, color: '#2a3340', haze: 0.0 }
+    ];
+    for (const L of layers) {
+      const off = camera.x * L.f;
+      ctx.fillStyle = L.color;
+      ctx.beginPath();
+      ctx.moveTo(0, VIEW_HEIGHT);
+      for (let x = 0; x <= VIEW_WIDTH; x += 8) {
+        const wx = x + off;
+        // ridged noise for sharp, natural-looking peaks
+        const n =
+          Math.abs(Math.sin(wx * L.freq)) * 0.6 +
+          Math.abs(Math.sin(wx * L.freq * 2.3 + 1.7)) * 0.3 +
+          Math.abs(Math.sin(wx * L.freq * 5.1 + 4.2)) * 0.1;
+        ctx.lineTo(x, L.base - n * L.amp);
+      }
+      ctx.lineTo(VIEW_WIDTH, VIEW_HEIGHT);
+      ctx.closePath();
+      ctx.fill();
+
+      // Mist band at the foot of each layer
+      const mist = ctx.createLinearGradient(0, L.base - 20, 0, L.base + 60);
+      mist.addColorStop(0, 'rgba(170, 150, 135, 0)');
+      mist.addColorStop(1, 'rgba(170, 150, 135, 0.18)');
+      ctx.fillStyle = mist;
+      ctx.fillRect(0, L.base - 20, VIEW_WIDTH, 80);
+    }
+
+    // Pine tree silhouettes on the nearest hills
+    const treeOff = camera.x * 0.38;
+    ctx.fillStyle = '#141b24';
+    for (let i = 0; i < 40; i++) {
+      const wx = i * 97 + ((i * 53) % 37);
+      const rx = wx - treeOff;
+      const rep = ((rx % (40 * 97)) + 40 * 97) % (40 * 97) - 150;
+      if (rep < -60 || rep > VIEW_WIDTH + 60) continue;
+      const h = 70 + ((i * 29) % 55);
+      const w = 22 + ((i * 17) % 12);
+      const baseY = 470;
+      ctx.beginPath();
+      ctx.moveTo(rep, baseY);
+      for (let t = 0; t < 4; t++) {
+        const ty = baseY - (h * t) / 4;
+        const tw = w * (1 - t * 0.2);
+        ctx.lineTo(rep - tw, ty);
+        ctx.lineTo(rep - tw * 0.4, ty - 4);
+        ctx.lineTo(rep, ty - h / 4 - 4);
+        ctx.lineTo(rep + tw * 0.4, ty - 4);
+        ctx.lineTo(rep + tw, ty);
+      }
+      ctx.lineTo(rep, baseY);
+      ctx.fill();
+    }
+    // Dark ground behind the trees
+    ctx.fillStyle = '#141b24';
+    ctx.fillRect(0, 468, VIEW_WIDTH, VIEW_HEIGHT - 468);
   }
 
   drawPlatforms(ctx, camera) {
+    ctx.save();
+    // Draw in world space so textures stay anchored to the terrain
+    ctx.translate(-camera.x, -camera.y);
+
     for (const plat of this.platforms) {
-      const rx = plat.x - camera.x;
-      const ry = plat.y - camera.y;
+      const rx = plat.x;
+      const ry = plat.y;
 
       // Frustum culling
-      if (rx + plat.w < -100 || rx > VIEW_WIDTH + 100) continue;
+      if (rx + plat.w < camera.x - 100 || rx > camera.x + VIEW_WIDTH + 100) continue;
+
+      // Contact shadow below / cast onto the background
+      const sh = ctx.createLinearGradient(0, ry + plat.h, 0, ry + plat.h + 26);
+      sh.addColorStop(0, 'rgba(0, 0, 0, 0.35)');
+      sh.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = sh;
+      ctx.fillRect(rx, ry + plat.h, plat.w, 26);
+
+      // Rock body with tiled noise texture
+      ctx.fillStyle = plat.type === 'grass' ? TEX.earth : TEX.rock;
+      ctx.fillRect(rx, ry, plat.w, plat.h);
+
+      // Vertical lighting: darker toward the bottom
+      const shade = ctx.createLinearGradient(0, ry, 0, ry + plat.h);
+      shade.addColorStop(0, 'rgba(255, 220, 170, 0.10)');
+      shade.addColorStop(0.3, 'rgba(0, 0, 0, 0.05)');
+      shade.addColorStop(1, 'rgba(0, 0, 0, 0.55)');
+      ctx.fillStyle = shade;
+      ctx.fillRect(rx, ry, plat.w, plat.h);
+
+      // Side shading (ambient occlusion on the edges)
+      const sideL = ctx.createLinearGradient(rx, 0, rx + 14, 0);
+      sideL.addColorStop(0, 'rgba(0, 0, 0, 0.4)');
+      sideL.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = sideL;
+      ctx.fillRect(rx, ry, 14, plat.h);
+      const sideR = ctx.createLinearGradient(rx + plat.w - 14, 0, rx + plat.w, 0);
+      sideR.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      sideR.addColorStop(1, 'rgba(0, 0, 0, 0.4)');
+      ctx.fillStyle = sideR;
+      ctx.fillRect(rx + plat.w - 14, ry, 14, plat.h);
+
+      // Cracks / stone seams (deterministic from position)
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+      ctx.lineWidth = 1;
+      const seed = Math.floor(plat.x + plat.y);
+      for (let i = 0; i < Math.min(14, plat.w / 28); i++) {
+        const cx = rx + 12 + ((seed * (i + 3) * 37) % Math.max(1, plat.w - 24));
+        const cy = ry + 10 + ((seed * (i + 5) * 17) % Math.max(1, plat.h - 14));
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(cx + 6 + (i % 3) * 3, cy + 5);
+        ctx.lineTo(cx + 3 + (i % 4) * 2, cy + 12);
+        ctx.stroke();
+      }
 
       if (plat.type === 'grass') {
-        // Platform Body (Earthy Rock)
-        ctx.fillStyle = '#78350f';
-        ctx.fillRect(rx, ry + 10, plat.w, plat.h - 10);
-
-        // Lush Grass Top
-        ctx.fillStyle = '#22c55e';
-        ctx.fillRect(rx, ry, plat.w, 12);
-
-        // Stylized grass drips / edge blades
-        ctx.fillStyle = '#16a34a';
-        ctx.fillRect(rx, ry + 10, plat.w, 3);
-        for (let i = 8; i < plat.w - 12; i += 22) {
-          ctx.beginPath();
-          ctx.moveTo(rx + i, ry + 12);
-          ctx.lineTo(rx + i + 5, ry + 18);
-          ctx.lineTo(rx + i + 10, ry + 12);
-          ctx.fill();
+        // Moss / dry grass cap with irregular, organic edge
+        ctx.fillStyle = '#2f3b22';
+        ctx.beginPath();
+        ctx.moveTo(rx, ry);
+        for (let x = 0; x <= plat.w; x += 5) {
+          const n = Math.sin((rx + x) * 0.31) * 2 + Math.sin((rx + x) * 0.87) * 2.2;
+          ctx.lineTo(rx + x, ry + 9 + n);
         }
-      } else {
-        // Modern Smooth Stone Platform
-        ctx.fillStyle = '#334155';
-        ctx.fillRect(rx, ry, plat.w, plat.h);
+        ctx.lineTo(rx + plat.w, ry);
+        ctx.closePath();
+        ctx.fill();
 
-        // Stone highlight
-        ctx.fillStyle = '#475569';
-        ctx.fillRect(rx, ry, plat.w, 4);
-
-        // Rivets/details
-        ctx.fillStyle = '#64748b';
-        ctx.fillRect(rx + 6, ry + 8, plat.w - 12, 2);
+        // Blades of grass in several muted tones
+        const tones = ['#46592f', '#3a4a28', '#5d6b36', '#2a3520'];
+        for (let x = 1; x < plat.w; x += 3) {
+          const k = Math.floor(rx + x);
+          const bh = 4 + ((k * 7) % 7);
+          ctx.strokeStyle = tones[k % tones.length];
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.moveTo(rx + x, ry + 3);
+          ctx.lineTo(rx + x + (((k * 13) % 5) - 2) * 0.8, ry - bh + 3);
+          ctx.stroke();
+        }
       }
+
+      // Warm rim light along the top edge (sun from the horizon)
+      ctx.fillStyle = 'rgba(255, 200, 140, 0.22)';
+      ctx.fillRect(rx, ry, plat.w, 1.5);
     }
+
+    ctx.restore();
 
     // Springs
     for (const s of this.springs) {
@@ -985,6 +1380,37 @@ class Level {
     for (const coin of this.coins) {
       coin.draw(ctx, camera);
     }
+  }
+
+  drawAtmosphere(ctx, camera) {
+    // Low-lying fog at the bottom of the screen
+    const fog = ctx.createLinearGradient(0, VIEW_HEIGHT * 0.55, 0, VIEW_HEIGHT);
+    fog.addColorStop(0, 'rgba(120, 130, 140, 0)');
+    fog.addColorStop(1, 'rgba(120, 130, 140, 0.22)');
+    ctx.fillStyle = fog;
+    ctx.fillRect(0, VIEW_HEIGHT * 0.55, VIEW_WIDTH, VIEW_HEIGHT * 0.45);
+
+    // Cool/warm color grade
+    ctx.fillStyle = 'rgba(20, 30, 50, 0.12)';
+    ctx.fillRect(0, 0, VIEW_WIDTH, VIEW_HEIGHT);
+
+    // Vignette
+    const vg = ctx.createRadialGradient(
+      VIEW_WIDTH / 2, VIEW_HEIGHT / 2, VIEW_HEIGHT * 0.45,
+      VIEW_WIDTH / 2, VIEW_HEIGHT / 2, VIEW_WIDTH * 0.7
+    );
+    vg.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    vg.addColorStop(1, 'rgba(0, 0, 0, 0.55)');
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, VIEW_WIDTH, VIEW_HEIGHT);
+
+    // Subtle film grain (random offset each frame)
+    ctx.save();
+    ctx.globalAlpha = 0.07;
+    ctx.translate(Math.floor(Math.random() * 128), Math.floor(Math.random() * 128));
+    ctx.fillStyle = TEX.grain;
+    ctx.fillRect(-128, -128, VIEW_WIDTH + 256, VIEW_HEIGHT + 256);
+    ctx.restore();
   }
 }
 
@@ -1052,7 +1478,7 @@ class Game {
     });
   }
 
-  reset() {
+  reset(fromNet = false) {
     this.level = new Level();
     this.player.reset();
     this.score = 0;
@@ -1061,6 +1487,8 @@ class Game {
     this.startTime = Date.now();
     this.updateHUD();
     victoryModal.classList.add('hidden');
+    net.resetStats();
+    if (!fromNet) net.sendReset();
   }
 
   addScore(pts) {
@@ -1075,6 +1503,7 @@ class Game {
 
   update() {
     this.player.update(this.level, this.particles);
+    net.tick(this.player);
     this.collectedCoins = this.level.update(this.player, this.particles);
     this.camera.update(this.player, this.level);
     this.particles.update();
@@ -1113,11 +1542,15 @@ class Game {
     // 2. Platforms & springs & coins
     this.level.drawPlatforms(ctx, this.camera);
 
-    // 3. Player
+    // 3. Other online players, then the local player on top
+    net.draw(ctx, this.camera);
     this.player.draw(ctx, this.camera);
 
     // 4. Particles
     this.particles.draw(ctx, this.camera);
+
+    // 5. Atmospheric post-processing (low fog, vignette, film grain)
+    this.level.drawAtmosphere(ctx, this.camera);
   }
 
   loop() {
