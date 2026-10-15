@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jump & Run - 2D Platformer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="game-container">
+    <div id="ui-overlay">
+      <div class="hud-left">
+        <div class="stat-badge">
+          <span class="icon">🪙</span>
+          <span id="coin-counter">0 / 0</span>
+        </div>
+        <div class="stat-badge">
+          <span class="icon">⭐</span>
+          <span id="score-counter">0</span>
+        </div>
+      </div>
+      <div class="hud-right">
+        <button id="sound-btn" class="ui-btn" title="Toggle Sound (M)">🔊 Sound: ON</button>
+        <button id="restart-btn" class="ui-btn" title="Reset (R)">🔄 Reset</button>
+      </div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="controls-hint">
+      <span><strong>A / D</strong> or <strong>← / →</strong> : Move</span>
+      <span><strong>Space</strong> or <strong>W</strong> or <strong>↑</strong> : Jump (Double Jump!)</span>
+      <span><strong>R</strong> : Reset</span>
+      <span><strong>M</strong> : Sound</span>
+    </div>
+
+    <!-- Victory message overlay -->
+    <div id="victory-modal" class="hidden">
+      <div class="modal-content">
+        <h2>🎉 Level Cleared!</h2>
+        <p>You gathered all the gold coins!</p>
+        <p id="final-stats"></p>
+        <button id="play-again-btn" class="action-btn">Play Again</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>
